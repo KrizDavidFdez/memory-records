@@ -3,14 +3,17 @@
   "version": "1.0.0",
   "description": "Script para generar frases usando la API de Easy Peasy AI",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
   "node-fetch": "^2.6.7",
   "axios": "^1.6.0",
   "crypto": "latest",
-  "express": "latest"
+  "express": "latest",
+  "undici": "^7.13.0" 
 },
   "author": "",
   "license": "MIT",

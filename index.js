@@ -11,7 +11,7 @@ if (!_fetch) {
 
 let _perf = globalThis.performance;
 if (!_perf) {
-  const { performance } = await import("node:perf_hooks");
+  const { performance } = await import("perf_hooks");
   _perf = performance;
 }
 

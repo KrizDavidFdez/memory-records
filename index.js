@@ -1,29 +1,33 @@
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const path = require("node:path");
-const express = require("express");
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import express from "express";
 
 let _fetch = globalThis.fetch;
 if (!_fetch) {
-  const { fetch } = require("undici");
+  const { fetch } = await import("undici");
   _fetch = fetch;
 }
 
 let _perf = globalThis.performance;
 if (!_perf) {
-  const { performance } = require("node:perf_hooks");
+  const { performance } = await import("node:perf_hooks");
   _perf = performance;
 }
 
-class ChatGPT {
+export class ChatGPT {
   constructor(cfg = {}) {
     this.baseUrl = "https://chatgpt.com";
-    this.userAgent = cfg.userAgent ?? "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36";
+    this.userAgent =
+      cfg.userAgent ??
+      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36";
     this.oaiDid = cfg.did ?? crypto.randomUUID();
     this.screenWidth = cfg.screenWidth ?? 423;
     this.screenHeight = cfg.screenHeight ?? 965;
     this.lang = cfg.lang ?? "id-ID";
-    this.buildNumber = cfg.buildNumber ?? "prod-69a06c53754594935887d6c16b844885964a78fc";
+    this.buildNumber =
+      cfg.buildNumber ??
+      "prod-69a06c53754594935887d6c16b844885964a78fc";
     this.authToken = cfg.authToken ?? null;
   }
 
@@ -44,25 +48,37 @@ class ChatGPT {
 
     let image = null;
     if (imagePath) {
-      image = await this._uploadImage(imagePath, { conversationId, parentMsgId });
+      image = await this._uploadImage(imagePath, {
+        conversationId,
+        parentMsgId,
+      });
     }
 
     const [tokens, conduitToken] = await Promise.all([
       this._generateSentinelTokens(),
-      this._getConduitToken(message, msgId, { conversationId, parentMsgId, webSearch, image }),
+      this._getConduitToken(message, msgId, {
+        conversationId,
+        parentMsgId,
+        webSearch,
+        image,
+      }),
     ]);
 
     const body = this._buildMessageBody(message, msgId, {
-      conversationId, parentMsgId, webSearch, image,
+      conversationId,
+      parentMsgId,
+      webSearch,
+      image,
     });
 
     const res = await _fetch(`${this.baseUrl}/backend-anon/f/conversation`, {
       method: "POST",
       body: JSON.stringify(body),
       headers: this._headers({
-        "accept": "text/event-stream",
+        accept: "text/event-stream",
         "OAI-Language": this.lang,
-        "OpenAI-Sentinel-Chat-Requirements-Token": tokens.chatRequirementsToken,
+        "OpenAI-Sentinel-Chat-Requirements-Token":
+          tokens.chatRequirementsToken,
         "OpenAI-Sentinel-Turnstile-Token": tokens.turnstile,
         "OpenAI-Sentinel-Proof-Token": tokens.pow,
         "X-Conduit-Token": conduitToken,
@@ -78,6 +94,10 @@ class ChatGPT {
   }
 
   async _uploadImage(filePath, ctx = {}) {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Archivo no encontrado: ${filePath}`);
+    }
+
     const fileBuffer = fs.readFileSync(filePath);
     const fileName = path.basename(filePath);
     const mimeType = this._getMimeType(fileName);
@@ -94,11 +114,13 @@ class ChatGPT {
         timezone_offset_min: new Date().getTimezoneOffset(),
         reset_rate_limits: false,
       }),
-    }).then(r => r.json());
+    }).then((r) => r.json());
 
     const { upload_url, file_id } = registerRes;
     if (!upload_url || !file_id) {
-      throw new Error(`Gagal mendaftar file: ${JSON.stringify(registerRes)}`);
+      throw new Error(
+        `Gagal mendaftar file: ${JSON.stringify(registerRes)}`
+      );
     }
 
     const uploadRes = await _fetch(upload_url, {
@@ -133,7 +155,11 @@ class ChatGPT {
 
     const processRes = await _fetch(
       `${this.baseUrl}/backend-anon/files/process_upload_stream`,
-      { method: "POST", headers: this._headers(), body: JSON.stringify(processBody) }
+      {
+        method: "POST",
+        headers: this._headers(),
+        body: JSON.stringify(processBody),
+      }
     );
 
     const decoder = new TextDecoder();
@@ -149,7 +175,7 @@ class ChatGPT {
   _headers(extra = {}) {
     return {
       "User-Agent": this.userAgent,
-      "accept": "*/*",
+      accept: "*/*",
       "accept-language": `${this.lang},en-US;q=0.9,en;q=0.8`,
       "content-type": "application/json",
       "OAI-Device-Id": this.oaiDid,
@@ -159,9 +185,11 @@ class ChatGPT {
       "sec-fetch-dest": "empty",
       "sec-fetch-mode": "cors",
       "sec-fetch-site": "same-origin",
-      "origin": "https://chatgpt.com",
-      "referer": "https://chatgpt.com/",
-      ...(this.authToken ? { "authorization": `Bearer ${this.authToken}` } : {}),
+      origin: "https://chatgpt.com",
+      referer: "https://chatgpt.com/",
+      ...(this.authToken
+        ? { authorization: `Bearer ${this.authToken}` }
+        : {}),
       ...extra,
     };
   }
@@ -170,10 +198,12 @@ class ChatGPT {
     let h = 2166136261;
     for (let i = 0; i < str.length; i++) {
       h ^= str.charCodeAt(i);
-      h  = Math.imul(h, 16777619) >>> 0;
+      h = Math.imul(h, 16777619) >>> 0;
     }
-    h ^= h >>> 16; h = Math.imul(h, 2246822507) >>> 0;
-    h ^= h >>> 13; h = Math.imul(h, 3266489909) >>> 0;
+    h ^= h >>> 16;
+    h = Math.imul(h, 2246822507) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 3266489909) >>> 0;
     h ^= h >>> 16;
     return (h >>> 0).toString(16).padStart(8, "0");
   }
@@ -194,7 +224,7 @@ class ChatGPT {
       this.lang,
       `${this.lang},en`,
       0,
-      "contacts\u2212[object ContactsManager]",
+      "contacts−[object ContactsManager]",
       "_reactListening",
       "User",
       _perf.now(),
@@ -212,7 +242,10 @@ class ChatGPT {
       cfg[3] = i;
       cfg[9] = Math.round(_perf.now() - start);
       const encoded = this._encodeConfig(cfg);
-      if (this._fnv1a(seed + encoded).substring(0, difficulty.length) <= difficulty) {
+      if (
+        this._fnv1a(seed + encoded).substring(0, difficulty.length) <=
+        difficulty
+      ) {
         return "gAAAAAB" + encoded + "~S";
       }
     }
@@ -221,13 +254,18 @@ class ChatGPT {
 
   async _generateSentinelTokens() {
     const initCfg = this._makeBrowserConfig();
-    initCfg[3] = 1; initCfg[9] = 0;
+    initCfg[3] = 1;
+    initCfg[9] = 0;
     const initToken = "gAAAAAC" + this._encodeConfig(initCfg);
 
     const prepareRes = await _fetch(
       `${this.baseUrl}/backend-anon/sentinel/chat-requirements/prepare`,
-      { method: "POST", headers: this._headers(), body: JSON.stringify({ p: initToken }) }
-    ).then(r => r.json());
+      {
+        method: "POST",
+        headers: this._headers(),
+        body: JSON.stringify({ p: initToken }),
+      }
+    ).then((r) => r.json());
 
     let pow = null;
     if (prepareRes.proofofwork?.required) {
@@ -249,13 +287,25 @@ class ChatGPT {
 
     const finalizeRes = await _fetch(
       `${this.baseUrl}/backend-anon/sentinel/chat-requirements/finalize`,
-      { method: "POST", headers: this._headers(), body: JSON.stringify(finalizeBody) }
-    ).then(r => r.json());
+      {
+        method: "POST",
+        headers: this._headers(),
+        body: JSON.stringify(finalizeBody),
+      }
+    ).then((r) => r.json());
 
-    return { pow, turnstile, chatRequirementsToken: finalizeRes.token ?? null };
+    return {
+      pow,
+      turnstile,
+      chatRequirementsToken: finalizeRes.token ?? null,
+    };
   }
 
-  async _getConduitToken(message, msgId, { conversationId, parentMsgId, webSearch, image }) {
+  async _getConduitToken(
+    message,
+    msgId,
+    { conversationId, parentMsgId, webSearch, image }
+  ) {
     const body = {
       action: "next",
       fork_from_shared_post: false,
@@ -286,11 +336,16 @@ class ChatGPT {
         body: JSON.stringify(body),
       }
     );
+
     const data = await res.json();
     return data.token ?? data.conduit_token;
   }
 
-  _buildMessageBody(message, msgId, { conversationId, parentMsgId, webSearch, image }) {
+  _buildMessageBody(
+    message,
+    msgId,
+    { conversationId, parentMsgId, webSearch, image }
+  ) {
     let content, msgMeta;
 
     if (image) {
@@ -308,16 +363,18 @@ class ChatGPT {
         ],
       };
       msgMeta = {
-        attachments: [{
-          id: image.fileId,
-          size: image.sizeBytes,
-          name: image.fileName,
-          mime_type: image.mimeType,
-          width: image.width,
-          height: image.height,
-          source: "local",
-          is_big_paste: false,
-        }],
+        attachments: [
+          {
+            id: image.fileId,
+            size: image.sizeBytes,
+            name: image.fileName,
+            mime_type: image.mimeType,
+            width: image.width,
+            height: image.height,
+            source: "local",
+            is_big_paste: false,
+          },
+        ],
         selected_github_repos: [],
         selected_all_github_repos: false,
         serialization_metadata: { custom_symbol_offsets: [] },
@@ -325,22 +382,24 @@ class ChatGPT {
     } else {
       content = { content_type: "text", parts: [message] };
       msgMeta = {
-        selected_github_repos:     [],
+        selected_github_repos: [],
         selected_all_github_repos: false,
-        serialization_metadata:    { custom_symbol_offsets: [] },
+        serialization_metadata: { custom_symbol_offsets: [] },
         ...(webSearch ? { system_hints: ["search"] } : {}),
       };
     }
 
     const body = {
       action: "next",
-      messages: [{
-        id: msgId,
-        author: { role: "user" },
-        create_time: Date.now() / 1000,
-        content,
-        metadata: msgMeta,
-      }],
+      messages: [
+        {
+          id: msgId,
+          author: { role: "user" },
+          create_time: Date.now() / 1000,
+          content,
+          metadata: msgMeta,
+        },
+      ],
       parent_message_id: parentMsgId,
       model: "auto",
       timezone_offset_min: new Date().getTimezoneOffset(),
@@ -399,7 +458,11 @@ class ChatGPT {
         if (!raw || raw === "[DONE]") continue;
 
         let json;
-        try { json = JSON.parse(raw); } catch { continue; }
+        try {
+          json = JSON.parse(raw);
+        } catch {
+          continue;
+        }
 
         if (json.conversation_id) {
           convId = json.conversation_id;
@@ -418,7 +481,9 @@ class ChatGPT {
 
         if (json.type === "title_generation") title = json.title;
 
-        if (json.type === "server_ste_metadata") model = json.metadata?.model_slug ?? null;
+        if (json.type === "server_ste_metadata") {
+          model = json.metadata?.model_slug ?? null;
+        }
 
         const patches = Array.isArray(json.v) ? json.v : [];
         for (const p of patches) {
@@ -453,25 +518,32 @@ class ChatGPT {
   _getImageDimensions(buffer, mimeType) {
     try {
       if (mimeType === "image/png") {
-        return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+        return {
+          width: buffer.readUInt32BE(16),
+          height: buffer.readUInt32BE(20),
+        };
       }
+
       if (mimeType === "image/jpeg") {
         let i = 2;
         while (i < buffer.length - 8) {
-          if (buffer[i] !== 0xFF) break;
+          if (buffer[i] !== 0xff) break;
           const marker = buffer[i + 1];
           const segLen = buffer.readUInt16BE(i + 2);
-          if (marker >= 0xC0 && marker <= 0xC3) {
-            return { height: buffer.readUInt16BE(i + 5), width: buffer.readUInt16BE(i + 7) };
+          if (marker >= 0xc0 && marker <= 0xc3) {
+            return {
+              height: buffer.readUInt16BE(i + 5),
+              width: buffer.readUInt16BE(i + 7),
+            };
           }
           i += 2 + segLen;
         }
       }
-    } catch { }
+    } catch {}
+
     return { width: 0, height: 0 };
   }
 }
-
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -524,11 +596,15 @@ app.post("/api/chat", async (req, res) => {
         webSearch,
         stream: true,
         onChunk: (chunk) => {
-          res.write(`data: ${JSON.stringify({ type: "chunk", chunk })}\n\n`);
+          res.write(
+            `data: ${JSON.stringify({ type: "chunk", chunk })}\n\n`
+          );
         },
       });
 
-      res.write(`data: ${JSON.stringify({ type: "done", result })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ type: "done", result })}\n\n`
+      );
       res.end();
       return;
     }

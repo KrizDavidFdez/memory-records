@@ -1,0 +1,20 @@
+{
+  "name": "chatgpt-memory",
+  "version": "1.0.0",
+  "description": "Script para generar frases usando la API de Easy Peasy AI",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+  "node-fetch": "^2.6.7",
+  "axios": "^1.6.0",
+  "crypto": "latest",
+  "express": "latest"
+},
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {},
+  "keywords": []
+}
+

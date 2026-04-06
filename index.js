@@ -1,636 +1,542 @@
-import crypto from "crypto";
-import fs from "fs";
-import path from "path";
-import express from "express";
+const fs = require("fs");
+const path = require("path");
+const axios = require("axios");
 
-let _fetch = globalThis.fetch;
-if (!_fetch) {
-  const { fetch } = await import("undici");
-  _fetch = fetch;
-}
+class HentaiLaDownloader {
+  constructor(options = {}) {
+    this.BASE = "https://cdn.hvidserv.com";
+    this.concurrency = options.concurrency || 8;
+    this.timeout = options.timeout || 30000;
 
-let _perf = globalThis.performance;
-if (!_perf) {
-  const { performance } = await import("perf_hooks");
-  _perf = performance;
-}
-
-export class ChatGPT {
-  constructor(cfg = {}) {
-    this.baseUrl = "https://chatgpt.com";
-    this.userAgent =
-      cfg.userAgent ??
-      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36";
-    this.oaiDid = cfg.did ?? crypto.randomUUID();
-    this.screenWidth = cfg.screenWidth ?? 423;
-    this.screenHeight = cfg.screenHeight ?? 965;
-    this.lang = cfg.lang ?? "id-ID";
-    this.buildNumber =
-      cfg.buildNumber ??
-      "prod-69a06c53754594935887d6c16b844885964a78fc";
-    this.authToken = cfg.authToken ?? null;
-  }
-
-  async send(message, opts = {}) {
-    if (!message?.trim()) throw new Error("Pesan tidak boleh kosong.");
-
-    const {
-      conversationId = null,
-      parentMessageId = null,
-      imagePath = null,
-      webSearch = false,
-      stream = false,
-      onChunk,
-    } = opts;
-
-    const parentMsgId = parentMessageId ?? "client-created-root";
-    const msgId = crypto.randomUUID();
-
-    let image = null;
-    if (imagePath) {
-      image = await this._uploadImage(imagePath, {
-        conversationId,
-        parentMsgId,
-      });
-    }
-
-    const [tokens, conduitToken] = await Promise.all([
-      this._generateSentinelTokens(),
-      this._getConduitToken(message, msgId, {
-        conversationId,
-        parentMsgId,
-        webSearch,
-        image,
-      }),
-    ]);
-
-    const body = this._buildMessageBody(message, msgId, {
-      conversationId,
-      parentMsgId,
-      webSearch,
-      image,
-    });
-
-    const res = await _fetch(`${this.baseUrl}/backend-anon/f/conversation`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: this._headers({
-        accept: "text/event-stream",
-        "OAI-Language": this.lang,
-        "OpenAI-Sentinel-Chat-Requirements-Token":
-          tokens.chatRequirementsToken,
-        "OpenAI-Sentinel-Turnstile-Token": tokens.turnstile,
-        "OpenAI-Sentinel-Proof-Token": tokens.pow,
-        "X-Conduit-Token": conduitToken,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text().catch(() => "(no body)");
-      throw new Error(`HTTP ${res.status}: ${err}`);
-    }
-
-    return this._parseSSE(res.body, { stream, onChunk });
-  }
-
-  async _uploadImage(filePath, ctx = {}) {
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`Archivo no encontrado: ${filePath}`);
-    }
-
-    const fileBuffer = fs.readFileSync(filePath);
-    const fileName = path.basename(filePath);
-    const mimeType = this._getMimeType(fileName);
-    const sizeBytes = fileBuffer.length;
-    const { width, height } = this._getImageDimensions(fileBuffer, mimeType);
-
-    const registerRes = await _fetch(`${this.baseUrl}/backend-anon/files`, {
-      method: "POST",
-      headers: this._headers(),
-      body: JSON.stringify({
-        file_name: fileName,
-        file_size: sizeBytes,
-        use_case: "multimodal",
-        timezone_offset_min: new Date().getTimezoneOffset(),
-        reset_rate_limits: false,
-      }),
-    }).then((r) => r.json());
-
-    const { upload_url, file_id } = registerRes;
-    if (!upload_url || !file_id) {
-      throw new Error(
-        `Gagal mendaftar file: ${JSON.stringify(registerRes)}`
-      );
-    }
-
-    const uploadRes = await _fetch(upload_url, {
-      method: "PUT",
-      headers: {
-        "Content-Type": mimeType,
-        "x-ms-blob-type": "BlockBlob",
-        "x-ms-version": "2020-04-08",
-      },
-      body: fileBuffer,
-    });
-
-    if (!uploadRes.ok) {
-      throw new Error(`Upload blob gagal: HTTP ${uploadRes.status}`);
-    }
-
-    const processBody = {
-      file_id,
-      use_case: "multimodal",
-      index_for_retrieval: false,
-      file_name: fileName,
-    };
-
-    if (ctx.conversationId || ctx.parentMsgId) {
-      processBody.metadata = {
-        library_file_info: {
-          origination_message_id: ctx.parentMsgId ?? null,
-          origination_thread_id: ctx.conversationId ?? null,
-        },
-      };
-    }
-
-    const processRes = await _fetch(
-      `${this.baseUrl}/backend-anon/files/process_upload_stream`,
-      {
-        method: "POST",
-        headers: this._headers(),
-        body: JSON.stringify(processBody),
-      }
-    );
-
-    const decoder = new TextDecoder();
-    let buf = "";
-    for await (const chunk of processRes.body) {
-      buf += decoder.decode(chunk, { stream: true });
-      if (buf.includes("file.processing.completed")) break;
-    }
-
-    return { fileId: file_id, fileName, mimeType, sizeBytes, width, height };
-  }
-
-  _headers(extra = {}) {
-    return {
-      "User-Agent": this.userAgent,
-      accept: "*/*",
-      "accept-language": `${this.lang},en-US;q=0.9,en;q=0.8`,
-      "content-type": "application/json",
-      "OAI-Device-Id": this.oaiDid,
-      "sec-ch-ua": '"Chromium";v="144", "Not/A)Brand";v="24"',
+    this.HEADERS = {
+      "User-Agent":
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+      Accept: "",
+      "Accept-Language": "es-419,es;q=0.9",
+      "Accept-Encoding": "identity",
+      Origin: this.BASE,
+      Referer: `${this.BASE}/`,
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+      "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124"',
       "sec-ch-ua-mobile": "?1",
       "sec-ch-ua-platform": '"Android"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-origin",
-      origin: "https://chatgpt.com",
-      referer: "https://chatgpt.com/",
-      ...(this.authToken
-        ? { authorization: `Bearer ${this.authToken}` }
-        : {}),
-      ...extra,
+      Connection: "keep-alive",
+      ...(options.headers || {}),
     };
   }
 
-  _fnv1a(str) {
-    let h = 2166136261;
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 16777619) >>> 0;
+  formatDate(dateStr) {
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return null;
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const yy = String(d.getFullYear()).slice(-2);
+    return `${mm}/${dd}/${yy}`;
+  }
+
+  formatTitle(slug = "") {
+    return String(slug)
+      .replace(/-/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+      .replace(/\b\w/g, (l) => l.toUpperCase());
+  }
+
+  extractId(input) {
+    const m = String(input).match(/([a-f0-9]{32})/i);
+    return m[1];
+  }
+
+  sanitizeFileName(name = "video") {
+    return name
+      .replace(/[\/:*?"<>|]/g, "")
+      .replace(/\s+/g, "_")
+      .trim();
+  }
+
+  async fetchBuf(url, headers = this.HEADERS) {
+    const res = await fetch(url, { headers });
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  read32(buf, off) {
+    return buf.readUInt32BE(off);
+  }
+
+  write32(buf, off, val) {
+    buf.writeUInt32BE(val >>> 0, off);
+  }
+
+  write64(buf, off, hi, lo) {
+    buf.writeUInt32BE(hi >>> 0, off);
+    buf.writeUInt32BE(lo >>> 0, off + 4);
+  }
+
+  findBox(buf, type, start = 0, end = buf.length) {
+    let i = start;
+    while (i + 8 <= end) {
+      const size = this.read32(buf, i);
+      const name = buf.slice(i + 4, i + 8).toString("ascii");
+      if (name === type) return { offset: i, size };
+      i += Math.max(size, 8);
     }
-    h ^= h >>> 16;
-    h = Math.imul(h, 2246822507) >>> 0;
-    h ^= h >>> 13;
-    h = Math.imul(h, 3266489909) >>> 0;
-    h ^= h >>> 16;
-    return (h >>> 0).toString(16).padStart(8, "0");
+    return null;
   }
 
-  _encodeConfig(cfg) {
-    return Buffer.from(JSON.stringify(cfg)).toString("base64");
-  }
+  patchDuration(initBuf, totalSeconds) {
+    const buf = Buffer.from(initBuf);
 
-  _makeBrowserConfig() {
-    return [
-      this.screenWidth + this.screenHeight,
-      String(new Date()),
-      2172649472,
-      0,
-      this.userAgent,
-      null,
-      this.buildNumber,
-      this.lang,
-      `${this.lang},en`,
-      0,
-      "contacts−[object ContactsManager]",
-      "_reactListening",
-      "User",
-      _perf.now(),
-      crypto.randomUUID(),
-      "",
-      8,
-      _perf.timeOrigin,
-      0, 0, 0, 0, 0, 0, 0,
-    ];
-  }
+    const moov = this.findBox(buf, "moov");
+    if (!moov) return buf;
 
-  _computePow(seed, difficulty, cfg) {
-    const start = _perf.now();
-    for (let i = 0; i < 500_000; i++) {
-      cfg[3] = i;
-      cfg[9] = Math.round(_perf.now() - start);
-      const encoded = this._encodeConfig(cfg);
-      if (
-        this._fnv1a(seed + encoded).substring(0, difficulty.length) <=
-        difficulty
-      ) {
-        return "gAAAAAB" + encoded + "~S";
+    const moovEnd = moov.offset + moov.size;
+
+    const mvhd = this.findBox(buf, "mvhd", moov.offset + 8, moovEnd);
+    if (mvhd) {
+      const version = buf[mvhd.offset + 8];
+      let timescale, durationOff;
+
+      if (version === 1) {
+        timescale = this.read32(buf, mvhd.offset + 8 + 1 + 3 + 16);
+        durationOff = mvhd.offset + 8 + 1 + 3 + 20;
+        const durationUnits = Math.round(totalSeconds * timescale);
+        this.write64(
+          buf,
+          durationOff,
+          Math.floor(durationUnits / 0x100000000),
+          durationUnits >>> 0
+        );
+      } else {
+        timescale = this.read32(buf, mvhd.offset + 8 + 1 + 3 + 8);
+        durationOff = mvhd.offset + 8 + 1 + 3 + 12;
+        const durationUnits = Math.round(totalSeconds * timescale);
+        this.write32(buf, durationOff, durationUnits);
       }
     }
-    return "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4De";
-  }
 
-  async _generateSentinelTokens() {
-    const initCfg = this._makeBrowserConfig();
-    initCfg[3] = 1;
-    initCfg[9] = 0;
-    const initToken = "gAAAAAC" + this._encodeConfig(initCfg);
+    let search = moov.offset + 8;
+    while (search < moovEnd) {
+      const trak = this.findBox(buf, "trak", search, moovEnd);
+      if (!trak) break;
 
-    const prepareRes = await _fetch(
-      `${this.baseUrl}/backend-anon/sentinel/chat-requirements/prepare`,
-      {
-        method: "POST",
-        headers: this._headers(),
-        body: JSON.stringify({ p: initToken }),
-      }
-    ).then((r) => r.json());
+      const trakEnd = trak.offset + trak.size;
+      const tkhd = this.findBox(buf, "tkhd", trak.offset + 8, trakEnd);
 
-    let pow = null;
-    if (prepareRes.proofofwork?.required) {
-      pow = this._computePow(
-        prepareRes.proofofwork.seed,
-        prepareRes.proofofwork.difficulty,
-        this._makeBrowserConfig()
-      );
-    }
+      if (tkhd) {
+        const version = buf[tkhd.offset + 8];
 
-    const turnstile = crypto
-      .randomBytes(Math.floor((2256 / 4) * 3))
-      .toString("base64")
-      .slice(0, 2256);
+        const mdia = this.findBox(buf, "mdia", trak.offset + 8, trakEnd);
+        if (mdia) {
+          const mdhd = this.findBox(
+            buf,
+            "mdhd",
+            mdia.offset + 8,
+            mdia.offset + mdia.size
+          );
 
-    const finalizeBody = { prepare_token: prepareRes.prepare_token ?? "" };
-    if (pow) finalizeBody.proofofwork = pow;
-    if (turnstile) finalizeBody.turnstile = turnstile;
+          if (mdhd) {
+            const mdhdV = buf[mdhd.offset + 8];
+            let timescale = 1;
 
-    const finalizeRes = await _fetch(
-      `${this.baseUrl}/backend-anon/sentinel/chat-requirements/finalize`,
-      {
-        method: "POST",
-        headers: this._headers(),
-        body: JSON.stringify(finalizeBody),
-      }
-    ).then((r) => r.json());
+            if (mdhdV === 1) {
+              timescale = this.read32(buf, mdhd.offset + 8 + 1 + 3 + 16);
+            } else {
+              timescale = this.read32(buf, mdhd.offset + 8 + 1 + 3 + 8);
+            }
 
-    return {
-      pow,
-      turnstile,
-      chatRequirementsToken: finalizeRes.token ?? null,
-    };
-  }
+            const mdhdDurUnits = Math.round(totalSeconds * timescale);
 
-  async _getConduitToken(
-    message,
-    msgId,
-    { conversationId, parentMsgId, webSearch, image }
-  ) {
-    const body = {
-      action: "next",
-      fork_from_shared_post: false,
-      parent_message_id: parentMsgId,
-      model: "auto",
-      timezone_offset_min: new Date().getTimezoneOffset(),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      conversation_mode: { kind: "primary_assistant" },
-      system_hints: webSearch ? ["search"] : [],
-      supports_buffering: true,
-      supported_encodings: ["v1"],
-      partial_query: {
-        id: msgId,
-        author: { role: "user" },
-        content: { content_type: "text", parts: [message] },
-      },
-      client_contextual_info: { app_name: "chatgpt.com" },
-    };
-
-    if (conversationId) body.conversation_id = conversationId;
-    if (image) body.attachment_mime_types = [image.mimeType];
-
-    const res = await _fetch(
-      `${this.baseUrl}/backend-anon/f/conversation/prepare`,
-      {
-        method: "POST",
-        headers: this._headers({ "X-Conduit-Token": "no-token" }),
-        body: JSON.stringify(body),
-      }
-    );
-
-    const data = await res.json();
-    return data.token ?? data.conduit_token;
-  }
-
-  _buildMessageBody(
-    message,
-    msgId,
-    { conversationId, parentMsgId, webSearch, image }
-  ) {
-    let content, msgMeta;
-
-    if (image) {
-      content = {
-        content_type: "multimodal_text",
-        parts: [
-          {
-            content_type: "image_asset_pointer",
-            asset_pointer: `file-service://${image.fileId}`,
-            size_bytes: image.sizeBytes,
-            width: image.width,
-            height: image.height,
-          },
-          message,
-        ],
-      };
-      msgMeta = {
-        attachments: [
-          {
-            id: image.fileId,
-            size: image.sizeBytes,
-            name: image.fileName,
-            mime_type: image.mimeType,
-            width: image.width,
-            height: image.height,
-            source: "local",
-            is_big_paste: false,
-          },
-        ],
-        selected_github_repos: [],
-        selected_all_github_repos: false,
-        serialization_metadata: { custom_symbol_offsets: [] },
-      };
-    } else {
-      content = { content_type: "text", parts: [message] };
-      msgMeta = {
-        selected_github_repos: [],
-        selected_all_github_repos: false,
-        serialization_metadata: { custom_symbol_offsets: [] },
-        ...(webSearch ? { system_hints: ["search"] } : {}),
-      };
-    }
-
-    const body = {
-      action: "next",
-      messages: [
-        {
-          id: msgId,
-          author: { role: "user" },
-          create_time: Date.now() / 1000,
-          content,
-          metadata: msgMeta,
-        },
-      ],
-      parent_message_id: parentMsgId,
-      model: "auto",
-      timezone_offset_min: new Date().getTimezoneOffset(),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      conversation_mode: { kind: "primary_assistant" },
-      enable_message_followups: true,
-      system_hints: webSearch ? ["search"] : [],
-      supports_buffering: true,
-      supported_encodings: ["v1"],
-      client_contextual_info: {
-        is_dark_mode: true,
-        time_since_loaded: 10,
-        page_height: 845,
-        page_width: 423,
-        pixel_ratio: 1.7,
-        screen_height: this.screenHeight,
-        screen_width: this.screenWidth,
-        app_name: "chatgpt.com",
-      },
-      no_auth_ad_preferences: {
-        personalization_enabled: true,
-        history_enabled: true,
-      },
-      paragen_cot_summary_display_override: "allow",
-      force_parallel_switch: "auto",
-    };
-
-    if (conversationId) body.conversation_id = conversationId;
-
-    if (webSearch) {
-      body.force_use_search = true;
-      body.client_reported_search_source = "conversation_composer_web_icon";
-    }
-
-    return body;
-  }
-
-  async _parseSSE(body, { stream, onChunk }) {
-    const decoder = new TextDecoder();
-    let buf = "";
-    let fullText = "";
-    let title = null;
-    let model = null;
-    let convId = null;
-    let assistantMsgId = null;
-
-    for await (const chunk of body) {
-      buf += decoder.decode(chunk, { stream: true });
-
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        const raw = line.slice(5).trim();
-        if (!raw || raw === "[DONE]") continue;
-
-        let json;
-        try {
-          json = JSON.parse(raw);
-        } catch {
-          continue;
+            if (mdhdV === 1) {
+              this.write64(
+                buf,
+                mdhd.offset + 8 + 1 + 3 + 20,
+                Math.floor(mdhdDurUnits / 0x100000000),
+                mdhdDurUnits >>> 0
+              );
+            } else {
+              this.write32(buf, mdhd.offset + 8 + 1 + 3 + 12, mdhdDurUnits);
+            }
+          }
         }
 
-        if (json.conversation_id) {
-          convId = json.conversation_id;
-        } else if (json.v?.conversation_id) {
-          convId = json.v.conversation_id;
-        }
+        if (mvhd) {
+          const mvhdV = buf[mvhd.offset + 8];
+          let movieTS =
+            mvhdV === 1
+              ? this.read32(buf, mvhd.offset + 28)
+              : this.read32(buf, mvhd.offset + 20);
 
-        if (
-          json.v &&
-          !Array.isArray(json.v) &&
-          json.v.message?.author?.role === "assistant" &&
-          json.v.message?.id
-        ) {
-          assistantMsgId = json.v.message.id;
-        }
+          const units = Math.round(totalSeconds * movieTS);
 
-        if (json.type === "title_generation") title = json.title;
-
-        if (json.type === "server_ste_metadata") {
-          model = json.metadata?.model_slug ?? null;
-        }
-
-        const patches = Array.isArray(json.v) ? json.v : [];
-        for (const p of patches) {
-          if (p.o === "append" && p.p?.includes("/message/content/parts/0")) {
-            fullText += p.v;
-            if (stream && typeof onChunk === "function") onChunk(p.v);
+          if (version === 1) {
+            this.write64(
+              buf,
+              tkhd.offset + 8 + 1 + 3 + 24,
+              Math.floor(units / 0x100000000),
+              units >>> 0
+            );
+          } else {
+            this.write32(buf, tkhd.offset + 8 + 1 + 3 + 16, units);
           }
         }
       }
+
+      search = trak.offset + trak.size;
     }
 
-    return {
-      text: fullText,
-      title,
-      model,
-      conversationId: convId,
-      messageId: assistantMsgId,
-    };
+    return buf;
   }
 
-  _getMimeType(fileName) {
-    const ext = path.extname(fileName).toLowerCase();
-    return {
-      ".png": "image/png",
-      ".jpg": "image/jpeg",
-      ".jpeg": "image/jpeg",
-      ".gif": "image/gif",
-      ".webp": "image/webp",
-    }[ext] ?? "application/octet-stream";
+  async getPlaylist(videoId) {
+    const url = `${this.BASE}/m3u8/${videoId}`;
+    const res = await fetch(url, { headers: this.HEADERS });
+    const text = await res.text();
+
+    let initUrl = null;
+    const segments = [];
+    let pendingDuration = null;
+
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+
+      if (line.startsWith("#EXT-X-MAP:URI=")) {
+        initUrl = line.match(/URI="([^"]+)"/)?.[1] || null;
+      } else if (line.startsWith("#EXTINF:")) {
+        pendingDuration = parseFloat(line.slice(8));
+      } else if (line.startsWith("http")) {
+        segments.push({ url: line, duration: pendingDuration || 0 });
+        pendingDuration = null;
+      }
+    }
+
+    const totalSeconds = segments.reduce((s, seg) => s + seg.duration, 0);
+    return { initUrl, segments, totalSeconds };
   }
 
-  _getImageDimensions(buffer, mimeType) {
+  async downloadAll(urls, concurrency = this.concurrency) {
+    const results = new Array(urls.length);
+    let idx = 0;
+
+    async function worker(ctx) {
+      while (idx < urls.length) {
+        const i = idx++;
+        results[i] = await ctx.fetchBuf(urls[i].url || urls[i]);
+      }
+    }
+
+    const workers = Array.from({ length: concurrency }, () => worker(this));
+    await Promise.all(workers);
+    return results;
+  }
+
+  async scrape(url) {
     try {
-      if (mimeType === "image/png") {
-        return {
-          width: buffer.readUInt32BE(16),
-          height: buffer.readUInt32BE(20),
-        };
-      }
+      const cleanUrl = url.replace(/\/+$/, "");
+      const parts = cleanUrl.split("/");
+      const episode = Number(parts[parts.length - 1]) || null;
+      const slugIndex = parts.findIndex((v) => v === "media");
+      const rawTitle = slugIndex !== -1 ? parts[slugIndex + 1] : null;
+      const title = this.formatTitle(rawTitle);
+      const dataUrl = `${cleanUrl}/__data.json?x-sveltekit-invalidated=0001`;
 
-      if (mimeType === "image/jpeg") {
-        let i = 2;
-        while (i < buffer.length - 8) {
-          if (buffer[i] !== 0xff) break;
-          const marker = buffer[i + 1];
-          const segLen = buffer.readUInt16BE(i + 2);
-          if (marker >= 0xc0 && marker <= 0xc3) {
-            return {
-              height: buffer.readUInt16BE(i + 5),
-              width: buffer.readUInt16BE(i + 7),
-            };
-          }
-          i += 2 + segLen;
+      const { data: json } = await axios.get(dataUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "application/json,text/plain",
+          Referer: cleanUrl,
+        },
+        timeout: this.timeout,
+      });
+
+      const dataNode = json?.nodes?.find((v) => v?.type === "data");
+      const arr = dataNode?.data || [];
+
+      const resolve = (value, seen = new WeakSet()) => {
+        if (typeof value === "number") {
+          if (value === -1) return null;
+          if (value >= 0 && value < arr.length) return resolve(arr[value], seen);
+          return value;
         }
-      }
-    } catch {}
+        if (Array.isArray(value)) return value.map((v) => resolve(v, seen));
+        if (value && typeof value === "object") {
+          if (seen.has(value)) return value;
+          seen.add(value);
+          const out = {};
+          for (const [k, v] of Object.entries(value)) out[k] = resolve(v, seen);
+          return out;
+        }
+        return value;
+      };
 
-    return { width: 0, height: 0 };
+      const resolved = arr.map((v) => {
+        try { return resolve(v); } catch { return v; }
+      });
+
+      const episodeObj =
+        resolved.find(
+          (v) =>
+            v &&
+            typeof v === "object" &&
+            (v.id || v.episodeNumber || v.publishedAt || v.filler !== undefined)
+        ) || {};
+
+      const embedsObj =
+        resolved.find(
+          (v) =>
+            v &&
+            typeof v === "object" &&
+            (Array.isArray(v.SUB) || Array.isArray(v.DUB) || Array.isArray(v.RAW))
+        ) || {};
+
+      const downloadsObj =
+        resolved.find(
+          (v) =>
+            v &&
+            typeof v === "object" &&
+            (Array.isArray(v.SUB) || Array.isArray(v.DUB) || Array.isArray(v.RAW)) &&
+            JSON.stringify(v).includes("server")
+        ) || {};
+
+      const getHvidData = (playUrl) => {
+        const id = playUrl?.match(/\/play\/([a-f0-9]+)/i)?.[1] || null;
+        return {
+          id,
+          play: playUrl || null,
+          m3u8: id ? `https://cdn.hvidserv.com/m3u8/${id}` : null,
+          embed: id ? `https://hvidserv.com/embed/${id}` : null,
+        };
+      };
+
+      const dedupeByUrl = (items = []) => {
+        const seen = new Set();
+        return items.filter((item) => {
+          const key = item?.url || item?.play || item?.m3u8;
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      };
+
+      const normalizeMirrors = (mirrorRefs) => {
+        if (!Array.isArray(mirrorRefs)) return [];
+        return dedupeByUrl(
+          mirrorRefs
+            .map((m) => resolve(m))
+            .filter((v) => v && typeof v === "object" && v.server && v.url)
+            .map((v) => ({ server: v.server || null, ...getHvidData(v.url) }))
+        );
+      };
+
+      const normalizeDownloads = (downloadRefs) => {
+        if (!Array.isArray(downloadRefs)) return [];
+        return dedupeByUrl(
+          downloadRefs
+            .map((d) => resolve(d))
+            .filter((v) => v && typeof v === "object" && v.server && v.url)
+            .map((v) => ({ server: v.server || null, url: v.url || null }))
+        );
+      };
+
+      const mirrors = {
+        SUB: normalizeMirrors(embedsObj.SUB || []),
+        DUB: normalizeMirrors(embedsObj.DUB || []),
+        RAW: normalizeMirrors(embedsObj.RAW || []),
+      };
+
+      const downloads = {
+        SUB: normalizeDownloads(downloadsObj.SUB || []),
+        DUB: normalizeDownloads(downloadsObj.DUB || []),
+        RAW: normalizeDownloads(downloadsObj.RAW || []),
+      };
+
+      const allMirrorLinks = [...mirrors.SUB, ...mirrors.DUB, ...mirrors.RAW];
+      const allDownloadLinks = [...downloads.SUB, ...downloads.DUB, ...downloads.RAW];
+
+      return {
+        success: true,
+        title,
+        episode,
+        url: cleanUrl,
+        filler: episodeObj.filler ?? null,
+        published: this.formatDate(episodeObj.publishedAt),
+        links: {
+          main: {
+            id: allMirrorLinks[0]?.id || null,
+            play: allMirrorLinks[0]?.play || null,
+            m3u8: allMirrorLinks[0]?.m3u8 || null,
+            embed: allMirrorLinks[0]?.embed || null,
+          },
+          mirrors,
+          downloads: allDownloadLinks,
+        },
+      };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  async downloadFromPlayUrl(playUrl, outputFile) {
+    const videoId = this.extractId(playUrl);
+    const { initUrl, segments, totalSeconds } = await this.getPlaylist(videoId);
+    let initBuf = await this.fetchBuf(initUrl);
+    initBuf = this.patchDuration(initBuf, totalSeconds);
+
+    const segBuffers = await this.downloadAll(segments);
+
+    const out = outputFile || `${videoId}.mp4`;
+
+    const ws = fs.createWriteStream(out);
+    const writeChunk = (b) =>
+      new Promise((res, rej) => ws.write(b, (e) => (e ? rej(e) : res())));
+
+    await writeChunk(initBuf);
+    for (const buf of segBuffers) await writeChunk(buf);
+
+    await new Promise((res, rej) => {
+      ws.end();
+      ws.on("finish", res);
+      ws.on("error", rej);
+    });
+
+    const stats = fs.statSync(out);
+
+    return {
+      success: true,
+      id: videoId,
+      file: path.resolve(out),
+      size: +(stats.size / 1024 / 1024).toFixed(2) + " MB",
+      segments: segments.length,
+    };
+  }
+
+  async download(pageUrl, outputFile = null) {
+    const info = await this.scrape(pageUrl);
+    const playUrl = info?.links?.main?.play;
+    const finalName =
+      outputFile ||
+      `${this.sanitizeFileName(info.title || "video")}_ep${info.episode || "1"}.mp4`;
+
+    const downloaded = await this.downloadFromPlayUrl(playUrl, finalName);
+
+    return {
+      success: true,
+      info,
+      download: downloaded,
+    };
   }
 }
+const express = require("express");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json());
 
-const chat = new ChatGPT({
-  lang: "es-ES",
+const downloader = new HentaiLaDownloader();
+
+// Directorio temporal para los videos
+const TMP_DIR = path.join(process.cwd(), "tmp_videos");
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+/**
+ * GET  /hentaidl?url=<episode-url>
+ * POST /hentaidl  { "url": "..." }
+ *
+ * Descarga el video completo (HLS → mp4) y lo sirve al cliente.
+ */
+app.all("/hentaidl", async (req, res) => {
+  const url = req.query.url || req.body?.url;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: 'Falta el parámetro "url".',
+      example: "GET /hentaidl?url=https://hentai.la/media/anime-title/1",
+    });
+  }
+
+  let tmpFile = null;
+
+  try {
+    // 1. Scrape info + play URL
+    console.log(`[1/3] Scrapeando: ${url}`);
+    const info = await downloader.scrape(url);
+
+    if (!info.success) {
+      return res.status(502).json({ success: false, error: "No se pudo obtener info del episodio." });
+    }
+
+    const playUrl = info.links?.main?.play;
+    if (!playUrl) {
+      return res.status(502).json({ success: false, error: "No se encontró URL de reproducción." });
+    }
+
+    // 2. Ruta del archivo temporal (dentro del proyecto, no /tmp)
+    const safeName = downloader.sanitizeFileName(info.title || "video");
+    const ep = info.episode || "1";
+    const fileName = `${safeName}_ep${ep}.mp4`;
+    tmpFile = path.join(TMP_DIR, `${safeName}_ep${ep}_${Date.now()}.mp4`);
+
+    console.log(`[2/3] Descargando segmentos → ${tmpFile}`);
+    const result = await downloader.downloadFromPlayUrl(playUrl, tmpFile);
+
+    if (!result.success || !fs.existsSync(tmpFile)) {
+      return res.status(500).json({ success: false, error: "Error al ensamblar el video." });
+    }
+
+    // 3. Servir al cliente
+    console.log(`[3/3] Enviando archivo (${result.size})`);
+    const stat = fs.statSync(tmpFile);
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("X-Episode-Title", info.title || "");
+    res.setHeader("X-Episode-Number", String(ep));
+    res.setHeader("X-Segments", String(result.segments));
+    res.setHeader("X-File-Size", result.size);
+
+    const stream = fs.createReadStream(tmpFile);
+
+    stream.on("end", () => {
+      fs.unlink(tmpFile, () => console.log(`[cleanup] Borrado: ${tmpFile}`));
+    });
+
+    stream.on("error", (err) => {
+      console.error("[stream error]", err.message);
+      fs.unlink(tmpFile, () => {});
+      if (!res.headersSent) res.status(500).json({ success: false, error: err.message });
+    });
+
+    stream.pipe(res);
+
+  } catch (err) {
+    if (tmpFile && fs.existsSync(tmpFile)) fs.unlink(tmpFile, () => {});
+    console.error("[error]", err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
 });
 
+// Health check
 app.get("/", (req, res) => {
   res.json({
-    status: true,
-    message: "API ChatGPT funcionando",
+    status: "ok",
     endpoints: {
-      chat: "POST /api/chat",
+      "GET  /hentaidl?url=<episode_url>": "Descarga el episodio como .mp4",
+      "POST /hentaidl  { url }": "Igual que GET pero url en body JSON",
     },
   });
 });
 
-app.post("/api/chat", async (req, res) => {
-  try {
-    const {
-      message,
-      conversationId = null,
-      parentMessageId = null,
-      imagePath = null,
-      webSearch = false,
-      stream = false,
-    } = req.body || {};
-
-    if (!message || !String(message).trim()) {
-      return res.status(400).json({
-        status: false,
-        error: "Falta el campo 'message'",
-      });
-    }
-
-    if (stream) {
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-      });
-
-      const result = await chat.send(message, {
-        conversationId,
-        parentMessageId,
-        imagePath,
-        webSearch,
-        stream: true,
-        onChunk: (chunk) => {
-          res.write(
-            `data: ${JSON.stringify({ type: "chunk", chunk })}\n\n`
-          );
-        },
-      });
-
-      res.write(
-        `data: ${JSON.stringify({ type: "done", result })}\n\n`
-      );
-      res.end();
-      return;
-    }
-
-    const result = await chat.send(message, {
-      conversationId,
-      parentMessageId,
-      imagePath,
-      webSearch,
-      stream: false,
-    });
-
-    return res.json({
-      status: true,
-      result,
-    });
-  } catch (err) {
-    console.error("Error /api/chat:", err);
-
-    return res.status(500).json({
-      status: false,
-      error: err.message || "Error interno del servidor",
-    });
-  }
-});
-
 app.listen(PORT, () => {
-  console.log(`🚀 API corriendo en http://localhost:${PORT}`);
+  console.log(`HentaiDL API → http://localhost:${PORT}`);
+  console.log(`Temp dir: ${TMP_DIR}`);
 });
+
+module.exports = app;
